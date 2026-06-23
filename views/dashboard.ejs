@@ -1,0 +1,98 @@
+[6/23, 23:07] +92 311 4397148: <!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MR SURAJ DASHBOARD</title>
+    <style>
+        body { background-color: #121212; color: white; font-family: Arial, sans-serif; padding: 20px; }
+        .container { max-width: 800px; margin: auto; }
+        .form-box { background: #1e1e1e; padding: 20px; border-radius: 10px; margin-bottom: 20px; }
+        input, select, textarea { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #333; border-radius: 5px; background: #333; color: white; box-sizing: border-box; }
+        button { padding: 10px 20px; border: none; border-radius: 5px; background: #007bff; color: white; font-weight: bold; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        .stop-btn { background: #dc3545; }
+        .stop-btn:hover { background: #c82333; }
+        .session-card { background: #1e1e1e; padding: 15px; border-radius: 8px; margin-bottom: 10px; border-left: 5px solid #28a745; }
+        .logs { background: #000; padding: 10px; height: 200px; overflow-y: scroll; border-radius: 5px; font-family: monospace; font-size: 12px; }
+        .dev { text-align: center; margin-top: 20px; color: #888; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 style="text-align: center;">MR SURAJ DASHBOARD</h1>
+        
+        <div class="form-box">
+            <h3>Start New Session</h3>
+            <form action="/start" method="POST" enctype="multipart/form-data">
+                <input type="text" name="targetID" placeholder="Target UID / Thread ID" required>
+                <input type="number" name="timer" placeholder="Delay in seconds (e.g. 5)" required>
+                <input type="text" name="hatersname" placeholder="Hater Name Prefix" required>
+                
+                <select name="cookieMethod" id="cookieMethod" onchange="toggleCookieInput()">
+                    <option value="single">Single Cookie (Paste)</option>
+                    <option value="multi">Multiple Cookies (Paste)</option>
+                    <option value="file">Upload Cookie File</option>
+                </select>
+
+                <div id="singleCookieDiv">
+                    <textarea name="singleCookie" placeholder="Paste single cookie here (c_user=123; xs=abc;)" rows="3"></textarea>
+                </div>
+                
+                <div id="multiCookieDiv" style="display:none;">
+                    <textarea name="multiCookies" placeholder="Paste multiple cookies here (one per line)" rows="5"></textarea>
+                </div>
+
+                <div id="cookieFileDiv" style="display:none;">
+                    <input type="file" name="cookiefile" accept=".txt,.json">
+                </div>
+
+                <label>Abusing / Messages File:</label>
+                <input type="file" name="abusingfile" accept=".txt" required>
+                
+                <button type="submit" style="width: 100%; background: #28a745;">RUN BOT</button>
+            </form>
+        </div>
+
+        <h3>Active Sessions</h3>
+        <% if (Object.keys(sessions).length === 0) { %>
+            <p>No active sessions running.</p>
+        <% } else { %>
+            <% for (const [id, data] of Object.entries(sessions)) { %>
+                <div class="session-card">
+                    <p><strong>Target:</strong> <%= data.targetID %> | <strong>Status:</strong> <%= data.status %> | <strong>Started:</strong> <%= data.startTime %></p>
+                    <form action="/stop" method="POST" style="display:inline;">
+                        <input type="hidden" name="sessionId" value="<%= id %>">
+                        <button type="submit" class="stop-btn">STOP</button>
+                    </form>
+                </div>
+            <% } %>
+        <% } %>
+
+        <h3>Live Logs</h3>
+        <div class="logs" id="logContainer"></div>
+
+        <div class="dev">Owner & Developer: <strong>MR SURAJ</strong></div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+        const logContainer = document.getElementById('logContainer');
+        socket.on('log', (msg) => {
+            const div = document.createElement('div');
+            div.innerText = msg;
+            logContainer.appendChild(div);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        });
+
+        function toggleCookieInput() {
+            const method = document.getElementById('cookieMethod').value;
+            document.getElementById('singleCookieDiv').style.display = method === 'single' ? 'block' : 'none';
+            document.getElementById('multiCookieDiv').style.display = method === 'multi' ? 'block' : 'none';
+            document.getElementById('cookieFileDiv').style.display = method === 'file' ? 'block' : 'none';
+        }
+    </script>
+</body>
+</html>
+[6/23, 23:11] +92 311 4397148: views/dashboard.ejs
