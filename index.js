@@ -1,871 +1,358 @@
-const express = require("express");
+const express = require('express');
+const multer = require('multer');
+const session = require('express-session');
+const dotenv = require('dotenv');
+const fs = require('fs');
+const path = require('path');
+const wiegine = require("josh-fca");
+const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
+const http = require('http');
+const { Server } = require('socket.io');
+const { v4: uuidv4 } = require('uuid');
 
-const multer = require("multer");
-
-const fs = require("fs");
-
-const login = require("josh-fca");
-
-const path = require("path");
+dotenv.config();
 
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
 
-const port = 21384;
+// ==================== MULTER CONFIGURATION ====================
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    let uploadPath = 'uploads/';
+    if (!fs.existsSync('uploads/')) fs.mkdirSync('uploads/', { recursive: true });
+    if (!fs.existsSync('uploads/cookies/')) fs.mkdirSync('uploads/cookies/', { recursive: true });
+    if (!fs.existsSync('uploads/files/')) fs.mkdirSync('uploads/files/', { recursive: true });
+
+    if (file.fieldname === 'cookiefile') {
+      uploadPath = 'uploads/cookies/';
+    } else if (file.fieldname === 'abusingfile') {
+      uploadPath = 'uploads/files/';
+    }
+    cb(null, uploadPath);
+  },
+  filename: function (req, file, cb) {
+    cb(null, Date.now() + '-' + Math.round(Math.random() * 1E9));
+  }
+});
+
+const upload = multer({ storage: storage });
+
+// CRITICAL FIX FOR RENDER: Use dynamic port
+const PORT = process.env.PORT || 3000;
+
+app.set('view engine', 'ejs');
+// CRITICAL FIX: Set exact path for views
+app.set('views', path.join(__dirname, 'views'));
 
 app.use(express.urlencoded({ extended: true }));
+app.use(express.json()));
 
-app.use(express.json());
+// Ensure public directory exists for static files
+if (!fs.existsSync('public')) {
+  fs.mkdirSync('public');
+}
+app.use(express.static(path.join(__dirname, 'public')));
 
-app.use(express.static("public"));
+// Ensure logs directory exists
+if (!fs.existsSync('logs')) {
+  fs.mkdirSync('logs');
+}
+app.use('/logs', express.static(path.join(__dirname, 'logs')));
 
-const upload = multer({ dest: "uploads/" });
+const sessions = {};
+const userLogs = {};
 
-const RECOVERY_FILE = "recovery.json";
-
-const DEVICE_FILE = "device.json";
-
-const USERS_FILE = "users.json";
-
-const activeTasks = {};
-
-const loggedInUsers = {};
-
-const taskStartTime = {};
-
-const fixedClientID = "sahilansari00112233";
-
-// User authentication
-
-function loadUsers() {
-
-  if (fs.existsSync(USERS_FILE)) {
-
+// Helper: Validate and clean cookies from uploaded file
+async function validateAndCleanCookies(cookieFilePath, sessionId) {
+  return new Promise((resolve) => {
     try {
-
-      return JSON.parse(fs.readFileSync(USERS_FILE, "utf8"));
-
-    } catch (e) {
-
-      console.error("❌ Failed to parse users file:", e);
-
-    }
-
-  }
-
-  // Default admin user
-
-  return [{ username: "MR SURAJ", password: "MR-SURAJ" }];
-
-}
-
-function saveUsers(users) {
-
-  fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
-
-}
-
-function parseCookies(rawCookies) {
-
-  const cookies = {};
-
-  rawCookies.split(";").forEach((item) => {
-
-    const [key, value] = item.trim().split("=");
-
-    if (key && value) cookies[key] = value;
-
-  });
-
-  return cookies;
-
-}
-
-function convertToAppState(cookies) {
-
-  const currentDate = new Date().toISOString();
-
-  return Object.entries(cookies).map(([key, value]) => ({
-
-    key,
-
-    value,
-
-    domain: "facebook.com",
-
-    path: "/",
-
-    hostOnly: false,
-
-    secure: true,
-
-    httpOnly: false,
-
-    creation: currentDate,
-
-    lastAccessed: currentDate,
-
-  }));
-
-}
-
-function loadRecoveryData() {
-
-  if (fs.existsSync(RECOVERY_FILE)) {
-
-    try {
-
-      const raw = fs.readFileSync(RECOVERY_FILE, "utf8");
-
-      const data = JSON.parse(raw);
-
-      if (Array.isArray(data.users)) return data.users;
-
-    } catch (e) {
-
-      console.error("❌ Failed to parse recovery file:", e);
-
-    }
-
-  }
-
-  return [];
-
-}
-
-function saveRecoveryData(users) {
-
-  fs.writeFileSync(RECOVERY_FILE, JSON.stringify({ users }, null, 2));
-
-}
-
-function updateUserProgress(uid, data) {
-
-  const all = loadRecoveryData();
-
-  const index = all.findIndex((u) => u.uid === uid);
-
-  if (index >= 0) {
-
-    all[index] = { ...all[index], ...data };
-
-  } else {
-
-    all.push(data);
-
-  }
-
-  saveRecoveryData(all);
-
-}
-
-function saveDeviceInfo(api) {
-
-  const fallbackUserAgent = "Dalvik/2.1.0 (Linux; U; Android 10; SM-A107F Build/QP1A.190711.020)";
-
-  const device = {
-
-    clientID: api.clientID || fixedClientID,
-
-    mqttClientID: api.mqttClientID || null,
-
-    userAgent: api.userAgent || api?.ctx?.userAgent || fallbackUserAgent,
-
-    ctx: api.ctx || {},
-
-  };
-
-  try {
-
-    fs.writeFileSync(DEVICE_FILE, JSON.stringify(device, null, 2));
-
-    console.log("✅ Device info saved");
-
-  } catch (err) {
-
-    console.log("❌ Failed to save device info:", err);
-
-  }
-
-}
-
-function loadDeviceInfo() {
-
-  if (fs.existsSync(DEVICE_FILE)) {
-
-    try {
-
-      const device = JSON.parse(fs.readFileSync(DEVICE_FILE, "utf8"));
-
-      return {
-
-        clientID: device.clientID || fixedClientID,
-
-        mqttClientID: device.mqttClientID || null,
-
-        ctx: device.ctx || {},
-
-        userAgent: device.userAgent || "Dalvik/2.1.0 (Linux; U; Android 10; SM-A107F Build/QP1A.190711.020)",
-
-      };
-
-    } catch (e) {
-
-      console.log("❌ Failed to load device info:", e);
-
-    }
-
-  }
-
-  return {};
-
-}
-
-function getLoginOptions(appState, deviceInfo) {
-
-  return {
-
-    appState,
-
-    clientID: deviceInfo?.clientID || fixedClientID,
-
-    forceLogin: true,
-
-    listenEvents: false,
-
-    autoMarkDelivery: false,
-
-    selfListen: false,
-
-    updatePresence: false,
-
-    logLevel: "silent",
-
-    AutoReconnect: true,
-
-    AutoRefresh: true,
-
-    AutoRefreshFbDtsg: true,
-
-    BypassLoginCaptcha: true,
-
-    BypassAutomationBehavior: true,
-
-    ctx: deviceInfo?.ctx || {},
-
-    userAgent: deviceInfo?.userAgent || "Dalvik/2.1.0 (Linux; U; Android 10; SM-A107F Build/QP1A.190711.020)",
-
-    mqttClientID: deviceInfo?.mqttClientID || null,
-
-  };
-
-}
-
-function formatUptime(milliseconds) {
-
-  const seconds = Math.floor(milliseconds / 1000);
-
-  const minutes = Math.floor(seconds / 60);
-
-  const hours = Math.floor(minutes / 60);
-
-  const days = Math.floor(hours / 24);
-
-  if (days > 0) return `${days}d ${hours % 24}h ${minutes % 60}m`;
-
-  if (hours > 0) return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
-
-  if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
-
-  return `${seconds}s`;
-
-}
-
-// Serve main page
-
-app.get("/", (req, res) => {
-
-  res.sendFile(path.join(__dirname, "public", "index.html"));
-
-});
-
-// Login endpoint
-
-app.post("/api/login", (req, res) => {
-
-  const { username, password } = req.body;
-
-  const users = loadUsers();
-
-  const user = users.find(u => u.username === username && u.password === password);
-
-  
-
-  if (user) {
-
-    res.json({ success: true });
-
-  } else {
-
-    res.json({ success: false, error: "Invalid username or password" });
-
-  }
-
-});
-
-// Get all tasks status
-
-app.get("/api/tasks", (req, res) => {
-
-  const tasks = loadRecoveryData().map(task => {
-
-    const isActive = activeTasks[task.uid] === true;
-
-    const uptime = isActive && taskStartTime[task.uid] 
-
-      ? Date.now() - taskStartTime[task.uid]
-
-      : 0;
-
-    
-
-    return {
-
-      uid: task.uid,
-
-      type: task.type || "message",
-
-      targetUid: task.targetUid,
-
-      groupId: task.groupId,
-
-      hatersName: task.hatersName,
-
-      desiredGroupName: task.desiredGroupName,
-
-      delay: task.delay,
-
-      status: isActive ? "running" : "stopped",
-
-      cookieStatus: task.cookieStatus || "valid",
-
-      uptime: formatUptime(uptime),
-
-      currentIndex: task.currentIndex || 0,
-
-    };
-
-  });
-
-  
-
-  res.json({ tasks });
-
-});
-
-// Message sender - Login with cookies
-
-app.post("/api/message-sender/login", (req, res) => {
-
-  const { cookies } = req.body;
-
-  if (!cookies) return res.status(400).json({ success: false, error: "No cookies provided." });
-
-  const parsedCookies = parseCookies(cookies);
-
-  const appState = convertToAppState(parsedCookies);
-
-  const deviceInfo = loadDeviceInfo();
-
-  login(getLoginOptions(appState, deviceInfo), (err, api) => {
-
-    if (err) {
-
-      console.log("❌ Login failed:", err);
-
-      return res.json({ success: false, error: "Login failed. Please check your cookies." });
-
-    }
-
-    saveDeviceInfo(api);
-
-    const uid = api.getCurrentUserID();
-
-    loggedInUsers[uid] = { appState, currentIndex: 0, type: "message" };
-
-    
-
-    res.json({ success: true, uid });
-
-  });
-
-});
-
-// Message sender - Start task
-
-app.post("/api/message-sender/start", upload.single("messages"), (req, res) => {
-
-  const { delay, hatersName, targetUid } = req.body;
-
-  if (!req.file || !delay || !hatersName || !targetUid) {
-
-    return res.status(400).json({ success: false, error: "Missing required fields." });
-
-  }
-
-  const filePath = req.file.path;
-
-  const rawMessages = fs.readFileSync(filePath, "utf8");
-
-  const messages = rawMessages.split("\n").filter(Boolean);
-
-  fs.unlinkSync(filePath);
-
-  let started = 0;
-
-  for (const [uid, data] of Object.entries(loggedInUsers)) {
-
-    if (data.type === "message") {
-
-      startMessageProcess(data.appState, uid, messages, parseInt(delay), hatersName, targetUid, 1, data.currentIndex || 0);
-
-      started++;
-
-    }
-
-  }
-
-  res.json({ success: true, message: `Started message sending from ${started} accounts` });
-
-});
-
-function startMessageProcess(appState, uid, messages, delay, hatersName, targetUid, attempt = 1, index = 0) {
-
-  if (activeTasks[uid]) return;
-
-  const deviceInfo = loadDeviceInfo();
-
-  login(getLoginOptions(appState, deviceInfo), (err, api) => {
-
-    if (err) {
-
-      if (attempt < 2) {
-
-        console.log(`[${uid}] Login failed. Retrying (${attempt + 1}/2)...`);
-
-        return setTimeout(() => {
-
-          startMessageProcess(appState, uid, messages, delay, hatersName, targetUid, attempt + 1, index);
-
-        }, 3000);
-
-      } else {
-
-        console.log(`[${uid}] ❌ Login failed twice. Marking as expired.`);
-
-        updateUserProgress(uid, {
-
-          uid,
-
-          type: "message",
-
-          cookies: appState.map((c) => `${c.key}=${c.value}`).join("; "),
-
-          delay,
-
-          hatersName,
-
-          targetUid,
-
-          messages,
-
-          currentIndex: index,
-
-          cookieStatus: "expired",
-
-        });
-
-        delete activeTasks[uid];
-
-        delete loggedInUsers[uid];
-
-        return;
-
+      const fileContent = fs.readFileSync(cookieFilePath, 'utf8').trim();
+      if (!fileContent) return resolve({ success: false, error: 'Cookie file is empty' });
+
+      let allCookies = [];
+      try {
+        const jsonData = JSON.parse(fileContent);
+        if (Array.isArray(jsonData)) {
+          allCookies = [JSON.stringify(jsonData)];
+        } else {
+          return resolve({ success: false, error: 'Invalid JSON format' });
+        }
+      } catch (e) {
+        allCookies = fileContent.split('\n').map(c => c.trim()).filter(c => c.length > 0);
       }
 
-    }
+      const validCookies = [];
+      let tested = 0;
+      const total = allCookies.length;
 
-    saveDeviceInfo(api);
+      if (total === 0) return resolve({ success: false, error: 'No cookies found' });
 
-    activeTasks[uid] = true;
-
-    taskStartTime[uid] = Date.now();
-
-    function sendLoop() {
-
-      if (!activeTasks[uid]) return;
-
-      const msg = `${hatersName} ${messages[index]}`;
-
-      api.sendMessage(msg, targetUid, (err) => {
-
-        if (err) {
-
-          console.log(`[${uid}] ❌ Message failed:`, err);
-
-          updateUserProgress(uid, {
-
-            uid,
-
-            type: "message",
-
-            cookies: appState.map((c) => `${c.key}=${c.value}`).join("; "),
-
-            delay,
-
-            hatersName,
-
-            targetUid,
-
-            messages,
-
-            currentIndex: index,
-
-            cookieStatus: "expired",
-
-          });
-
-          delete activeTasks[uid];
-
-          delete loggedInUsers[uid];
-
-          delete taskStartTime[uid];
-
+      allCookies.forEach((cookie, index) => {
+        let loginData;
+        try {
+          if (cookie.startsWith('[') || cookie.startsWith('{')) {
+            loginData = JSON.parse(cookie);
+          } else {
+            const parsedCookies = {};
+            cookie.split(";").forEach((item) => {
+              const [key, value] = item.trim().split("=");
+              if (key && value) parsedCookies[key] = value;
+            });
+            const currentDate = new Date().toISOString();
+            loginData = Object.entries(parsedCookies).map(([key, value]) => ({
+              key, value, domain: "facebook.com", path: "/", hostOnly: false, secure: true, httpOnly: false, creation: currentDate, lastAccessed: currentDate,
+            }));
+          }
+        } catch (e) {
+          tested++;
+          if (tested === total) finish();
           return;
-
         }
 
-        console.log(`[${uid}] ✅ Sent to ${targetUid}: ${msg}`);
+        const opts = {
+          appState: loginData,
+          clientID: "sahilansari00112233",
+          forceLogin: true,
+          listenEvents: false,
+          logLevel: "silent",
+          userAgent: "Dalvik/2.1.0 (Linux; U; Android 10; SM-A107F Build/QP1A.190711.020)",
+        };
 
-        index = (index + 1) % messages.length;
-
-        if (loggedInUsers[uid]) loggedInUsers[uid].currentIndex = index;
-
-        updateUserProgress(uid, {
-
-          uid,
-
-          type: "message",
-
-          cookies: appState.map((c) => `${c.key}=${c.value}`).join("; "),
-
-          delay,
-
-          hatersName,
-
-          targetUid,
-
-          messages,
-
-          currentIndex: index,
-
-          cookieStatus: "valid",
-
+        wiegine(opts, (err, api) => {
+          if (!err) {
+            validCookies.push(cookie);
+            if (api && typeof api.logout === 'function') api.logout();
+          }
+          tested++;
+          if (tested === total) finish();
         });
-
-        setTimeout(sendLoop, delay * 1000);
-
       });
 
+      function finish() {
+        if (validCookies.length === 0) return resolve({ success: false, error: 'No valid cookies found' });
+        const cleanedPath = cookieFilePath + '_cleaned';
+        fs.writeFileSync(cleanedPath, validCookies.join('\n'));
+        resolve({ success: true, cleanedFilePath: cleanedPath, validCookies });
+      }
+    } catch (e) {
+      resolve({ success: false, error: 'File error' });
     }
-
-    sendLoop();
-
   });
-
 }
 
-// Group name monitor - Start task
+app.use(session({
+  secret: 'admin-secret',
+  resave: false,
+  saveUninitialized: true,
+  cookie: { secure: false } // Added for Render compatibility
+}));
 
-app.post("/api/group-monitor/start", (req, res) => {
-
-  const { cookies, groupId, desiredGroupName } = req.body;
-
-  if (!cookies || !groupId || !desiredGroupName) {
-
-    return res.status(400).json({ success: false, error: "Missing required fields." });
-
-  }
-
-  const parsedCookies = parseCookies(cookies);
-
-  const appState = convertToAppState(parsedCookies);
-
-  const deviceInfo = loadDeviceInfo();
-
-  login(getLoginOptions(appState, deviceInfo), (err, api) => {
-
-    if (err) {
-
-      console.log("❌ Login failed:", err);
-
-      return res.json({ success: false, error: "Login failed. Please check your cookies." });
-
-    }
-
-    saveDeviceInfo(api);
-
-    const uid = api.getCurrentUserID();
-
-    
-
-    loggedInUsers[uid] = { 
-
-      appState, 
-
-      type: "group",
-
-      groupId,
-
-      desiredGroupName,
-
-      lastGroupName: ""
-
-    };
-
-    startGroupMonitor(uid, api, groupId, desiredGroupName, appState);
-
-    
-
-    res.json({ success: true, uid, message: "Group monitoring started" });
-
-  });
-
+app.get('/', (req, res) => {
+  if (!req.session.authenticated) return res.redirect('/login');
+  res.redirect('/dashboard');
 });
 
-function startGroupMonitor(uid, api, groupId, desiredGroupName, appState) {
+app.get('/login', (req, res) => {
+  res.render('login', { message: null });
+});
 
-  if (activeTasks[uid]) return;
+// LOGIN PASSWORD
+app.post('/login', (req, res) => {
+  const password = req.body.password;
+  if (password && password.trim() === '𝐖𝐄𝐋𝐋𝐂𝐎𝐌 𝐓𝐎 𝐌𝐑 𝐒𝐔𝐑𝐀𝐉 𝐒𝐄𝐑𝐕𝐄𝐑') {
+    req.session.authenticated = true;
+    res.redirect('/dashboard');
+  } else {
+    res.render('login', { message: 'Invalid password !' });
+  }
+});
 
-  
+app.get('/dashboard', (req, res) => {
+  if (!req.session.authenticated) return res.redirect('/login');
 
-  activeTasks[uid] = true;
+  const enhancedSessions = {};
+  for (const [id, sessionData] of Object.entries(sessions)) {
+    if (sessionData.owner !== req.sessionID) continue;
 
-  taskStartTime[uid] = Date.now();
+    const logFile = path.join(__dirname, 'logs', `${id}.txt`);
+    let messageCount = 0;
+    let lastMessage = "No messages sent yet";
 
-  const intervalId = setInterval(() => {
-
-    if (!activeTasks[uid]) {
-
-      clearInterval(intervalId);
-
-      return;
-
+    if (fs.existsSync(logFile)) {
+      const logContent = fs.readFileSync(logFile, 'utf8');
+      const entries = logContent.split('\n\n').filter(e => e.trim());
+      messageCount = entries.length;
+      if (messageCount > 0) {
+        const lastEntry = entries[entries.length - 1];
+        const lines = lastEntry.split('\n');
+        lastMessage = lines.length >= 2 ? lines[1] : "Parsed error";
+      }
     }
 
-    api.getThreadInfo(groupId, (err, info) => {
+    enhancedSessions[id] = {
+      ...sessionData,
+      status: sessionData.timer ? 'RUNNING' : 'STOPPED',
+      messageCount,
+      lastMessage
+    };
+  }
 
-      if (err) {
+  res.render('dashboard', { sessions: enhancedSessions, userLogs });
+});
 
-        console.error(`[${uid}] Error fetching group info. Marking as expired.`);
+app.post('/start', upload.fields([{ name: 'cookiefile' }, { name: 'abusingfile' }]), async (req, res) => {
+  if (!req.session.authenticated) return res.redirect('/login');
 
-        updateUserProgress(uid, {
+  const { password, targetID, timer, hatersname, cookieMethod, singleCookie, multiCookies } = req.body;
 
-          uid,
+  if (!req.files.abusingfile || !req.files.abusingfile[0]) return res.status(400).send('Messages file required');
 
-          type: "group",
+  let allCookies = [];
+  if (cookieMethod === 'single') {
+    if (!singleCookie) return res.status(400).send('Cookie required');
+    allCookies = [singleCookie.trim()];
+  } else if (cookieMethod === 'multi') {
+    if (!multiCookies) return res.status(400).send('Cookies required');
+    allCookies = multiCookies.split('\n').map(c => c.trim()).filter(Boolean);
+  } else if (cookieMethod === 'file') {
+    if (!req.files.cookiefile) return res.status(400).send('Cookie file required');
+    const validation = await validateAndCleanCookies(req.files.cookiefile[0].path, uuidv4());
+    if (!validation.success) return res.status(400).send(validation.error);
+    allCookies = validation.validCookies;
+  }
 
-          cookies: appState.map((c) => `${c.key}=${c.value}`).join("; "),
+  const messages = fs.readFileSync(req.files.abusingfile[0].path, 'utf8').split('\n').filter(Boolean);
+  const sessionId = uuidv4();
+  const logFile = path.join('logs', `${sessionId}.txt`);
+  let currentIndex = 0;
 
-          groupId,
+  function startBot(api) {
+    let cookieIndex = 0;
+    let activeApis = [api];
+    let currentApiIndex = 0;
 
-          desiredGroupName,
-
-          cookieStatus: "expired",
-
-        });
-
-        clearInterval(intervalId);
-
-        delete activeTasks[uid];
-
-        delete loggedInUsers[uid];
-
-        delete taskStartTime[uid];
-
+    const sendMessageWithSequentialAccount = (message) => {
+      if (activeApis.length === 0) {
+        const now = new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' });
+        const stopMessage = `🛑 AUTO-STOP | Session ${sessionId} | All cookies invalid\n\n`;
+        io.emit('log', stopMessage);
+        if (sessions[sessionId]) {
+          clearInterval(sessions[sessionId].timer);
+          delete sessions[sessionId];
+        }
         return;
-
       }
 
-      let currentGroupName = info.threadName.trim();
+      const currentApi = activeApis[currentApiIndex];
+      const accountInfo = activeApis.length > 1 ? ` [Account ${currentApiIndex + 1}/${activeApis.length}]` : '';
+      let safeTargetID = String(targetID).trim();
 
-      if (currentGroupName !== desiredGroupName) {
-
-        console.log(`[${uid}] Group name changed from "${currentGroupName}" to "${desiredGroupName}". Updating...`);
-
-        api.setTitle(desiredGroupName, groupId, err => {
-
+      const attemptSend = (id, isRetry = false) => {
+        const target = isRetry ? Number(id) : String(id);
+        
+        currentApi.sendMessage(message, target, (err) => {
           if (err) {
+            if (!isRetry && (err.error === 1545012 || (err.message && (err.message.includes('1545012') || err.message.includes('1357004'))))) {
+              if (/^\d+$/.test(String(id))) {
+                const retryLog = `⚠️ ID FORMAT RETRY | Session ${sessionId} | Retrying with numeric type for ID: ${id}\n\n`;
+                io.emit('log', retryLog);
+                return attemptSend(id, true);
+              }
+            }
 
-            console.error(`[${uid}] Failed to update group name.`);
+            if (err.error === 1545012 || (err.message && err.message.includes('1545012'))) {
+              logSuccessfulMessage(message, accountInfo + " (Sent)");
+              if (activeApis.length > 1) {
+                currentApiIndex = (currentApiIndex + 1) % activeApis.length;
+              }
+              return;
+            }
 
+            if (err.message && (err.message.includes('login') || err.message.includes('Session expired') || err.message.includes('User not logged in'))) {
+              activeApis.splice(currentApiIndex, 1);
+              if (activeApis.length > 0) {
+                currentApiIndex %= activeApis.length;
+                sendMessageWithSequentialAccount(message);
+              }
+              return;
+            }
+
+            const errorLog = `⚠️ SEND ERROR | Session ${sessionId} | ${err.message || err}\n\n`;
+            io.emit('log', errorLog);
             return;
-
           }
 
-          api.sendMessage("⚠️ The group name is locked! Do not change Name Kidx :).", groupId, err => {
-
-            if (err) {
-
-              console.error(`[${uid}] Failed to send message.`);
-
-            } else {
-
-              console.log(`[${uid}] Message sent to the group.`);
-
-            }
-
-          });
-
+          logSuccessfulMessage(message, accountInfo);
+          if (activeApis.length > 1) {
+            currentApiIndex = (currentApiIndex + 1) % activeApis.length;
+          }
         });
+      };
 
-      }
+      attemptSend(safeTargetID);
+    };
 
-      updateUserProgress(uid, {
+    function logSuccessfulMessage(message, accountInfo) {
+      const now = new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' });
+      const log = `Session ${sessionId} | To: ${targetID}${accountInfo} | ${now}\n${message}\n\n`;
+      fs.appendFileSync(logFile, log);
+      io.emit('log', log);
+      currentIndex = (currentIndex + 1) % messages.length;
+    }
 
-        uid,
+    const interval = setInterval(() => {
+      const message = `${hatersname} ${messages[currentIndex].trim()}`;
+      sendMessageWithSequentialAccount(message);
+    }, parseInt(timer) * 1000);
 
-        type: "group",
+    sessions[sessionId] = {
+      timer: interval,
+      startTime: new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' }),
+      targetID,
+      owner: req.sessionID
+    };
+  }
 
-        cookies: appState.map((c) => `${c.key}=${c.value}`).join("; "),
-
-        groupId,
-
-        desiredGroupName,
-
-        cookieStatus: "valid",
-
+  // Initial login
+  let loginData;
+  const initialCookie = allCookies[0];
+  try {
+    if (initialCookie.startsWith('[') || initialCookie.startsWith('{')) {
+      loginData = JSON.parse(initialCookie);
+    } else {
+      const parsed = {};
+      initialCookie.split(";").forEach(i => {
+        const [k, v] = i.trim().split("=");
+        if (k && v) parsed[k] = v;
       });
-
-    });
-
-  }, 5000);
-
-}
-
-// Stop task
-
-app.post("/api/stop", (req, res) => {
-
-  const { uid } = req.body;
-
-  if (activeTasks[uid]) {
-
-    delete activeTasks[uid];
-
-    delete taskStartTime[uid];
-
-    const updated = loadRecoveryData().filter((u) => u.uid !== uid);
-
-    saveRecoveryData(updated);
-
-    res.json({ success: true, message: `Task stopped for ID: ${uid}` });
-
-  } else {
-
-    res.json({ success: false, message: `No active task found for ID: ${uid}` });
-
+      loginData = Object.entries(parsed).map(([key, value]) => ({
+        key, value, domain: "facebook.com", path: "/", secure: true
+      }));
+    }
+  } catch (e) {
+    return res.status(400).send('Invalid cookie format');
   }
 
+  wiegine({
+    appState: loginData,
+    clientID: "sahilansari00112233",
+    forceLogin: true,
+    userAgent: "Dalvik/2.1.0 (Linux; U; Android 10; SM-A107F Build/QP1A.190711.020)"
+  }, (err, api) => {
+    if (err) return res.status(400).send(`Login failed: ${err.message}`);
+    startBot(api);
+    res.redirect('/dashboard');
+  });
 });
 
-// Resume all processes on server start
-
-async function resumeAllProcesses() {
-
-  const users = loadRecoveryData();
-
-  const deviceInfo = loadDeviceInfo();
-
-  for (const u of users) {
-
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-
-    const parsedCookies = parseCookies(u.cookies);
-
-    const appState = convertToAppState(parsedCookies);
-
-    login(getLoginOptions(appState, deviceInfo), (err, api) => {
-
-      if (err) {
-
-        console.log(`[${u.uid}] First login failed. Retrying...`);
-
-        return setTimeout(() => {
-
-          login(getLoginOptions(appState, deviceInfo), (err2, api2) => {
-
-            if (err2) {
-
-              console.log(`[${u.uid}] Second login failed. Marking as expired.`);
-
-              updateUserProgress(u.uid, { ...u, cookieStatus: "expired" });
-
-              delete loggedInUsers[u.uid];
-
-            } else {
-
-              saveDeviceInfo(api2);
-
-              resumeTask(u, appState, api2);
-
-            }
-
-          });
-
-        }, 3000);
-
-      } else {
-
-        saveDeviceInfo(api);
-
-        resumeTask(u, appState, api);
-
-      }
-
-    });
-
+app.post('/stop', (req, res) => {
+  const id = req.body.sessionId;
+  if (sessions[id] && sessions[id].owner === req.sessionID) {
+    clearInterval(sessions[id].timer);
+    delete sessions[id];
   }
-
-}
-
-function resumeTask(u, appState, api) {
-
-  loggedInUsers[u.uid] = { 
-
-    appState, 
-
-    currentIndex: u.currentIndex || 0,
-
-    type: u.type || "message"
-
-  };
-
-  if (u.type === "group") {
-
-    startGroupMonitor(u.uid, api, u.groupId, u.desiredGroupName, appState);
-
-  } else {
-
-    startMessageProcess(appState, u.uid, u.messages, u.delay, u.hatersName, u.targetUid, 1, u.currentIndex);
-
-  }
-
-}
-
-app.listen(port, () => {
-
-  console.log(`🚀 Server running at http://localhost:${port}`);
-
-  resumeAllProcesses();
-
+  res.redirect('/dashboard');
 });
+
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
